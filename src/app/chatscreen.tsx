@@ -6,13 +6,16 @@ import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useLoading } from "@/context/LoadingContext";
-import io from 'socket.io-client';
 import CallScreen from "@/components/CallScreen";
 import InCallManager from "react-native-incall-manager";
 import { Audio } from 'expo-av';
+import { useSocket } from "@/context/SocketContext";
+import MediaOptionsModal from "../components/models/MediaOptionsModal";
+import ImagePreviewModalComponent from "../components/models/ImagePreviewModalComponent";
+import ShowFullImagePreviewModal from "../components/models/ShowFullImagePreviewModal";
+import { ChatHeader } from "../components/ChatHeader";
+import { MessageBubble } from "../components/MessageBubble";
 
-// Create socket instance
-let socket: any;
 
 type Message = {
     _id: string;
@@ -49,7 +52,6 @@ export default function ChatScreen() {
     const [currentUserId, setCurrentUserId] = useState<string>("");
     const [currentUser, setCurrentUser] = useState<any>(null);
     const [refreshing, setRefreshing] = useState(false);
-    const [isConnected, setIsConnected] = useState(false);
     const flatListRef = useRef<FlatList<DisplayMessage> | null>(null);
     const { showLoader, hideLoader } = useLoading();
 
@@ -58,48 +60,22 @@ export default function ChatScreen() {
     const [isInitiator, setIsInitiator] = useState(false);
     const [incomingCall, setIncomingCall] = useState(null);
     const [callConnecting, setCallConnecting] = useState(false);
+    const [selectedImageUri, setSelectedImageUri] = useState<string | null>(null);
+    const [showImagePreview, setShowImagePreview] = useState(false);
+    const [fullImageVisible, setFullImageVisible] = useState(false);
+    const [selectedFullImage, setSelectedFullImage] = useState<string | null>(null);
+    const [imageSizes, setImageSizes] = useState<{ [key: string]: { width: number, height: number } }>({});
 
-    const { chatId, userName, userAvatar, userEmail, userPhone, userStatus, isOnline, lastSeen } = params;
 
-    // Initialize socket connection (matching React app logic)
-    const initializeSocket = useCallback(() => {
-        if (socket && socket.connected) {
-            console.log("Socket already connected");
-            return socket;
-        }
+    const { chatId, userId, userName, userAvatar, userEmail, userPhone, userStatus, isOnline, lastSeen } = params;
 
-        console.log("Initializing socket connection...");
-        socket = io('https://real-chat-backend-c3nm.onrender.com', {
-            transports: ['websocket', 'polling'],
-            reconnection: true,
-            reconnectionAttempts: 5,
-            reconnectionDelay: 1000,
-        });
+    const {
+        socket,
+        onlineUsers,
+        isConnected,
+    } = useSocket();
 
-        socket.on('connect', () => {
-            console.log('✅ Socket connected successfully');
-            setIsConnected(true);
-
-            // Join chat room after connection (matching React app)
-            if (chatId) {
-                socket.emit('joinChat', chatId);
-                console.log('Joined chat room:', chatId);
-            }
-        });
-
-        socket.on('connect_error', (error: any) => {
-            console.log('❌ Socket connection error:', error);
-            setIsConnected(false);
-        });
-
-        socket.on('disconnect', (reason: string) => {
-            console.log('Socket disconnected:', reason);
-            setIsConnected(false);
-        });
-
-        return socket;
-    }, [chatId]);
-
+    const isChatUserOnline = onlineUsers.includes(userId as string);
 
     useEffect(() => {
         if (!socket) return;
@@ -168,59 +144,83 @@ export default function ChatScreen() {
         getCurrentUser();
     }, []);
 
-    // Initialize socket when user is loaded (matching React app)
-    useEffect(() => {
-        if (currentUserId) {
-            initializeSocket();
-        }
-
-        return () => {
-            if (socket) {
-                socket.off('connect');
-                socket.off('connect_error');
-                socket.off('disconnect');
-                socket.off('receiveMessage');
-                socket.off('receiveImage');
-            }
-        };
-    }, [currentUserId, initializeSocket]);
-
-    // Socket event listeners (matching React app)
     useEffect(() => {
         if (!socket) return;
 
-        // Listen for new messages (matching React app)
-        const handleReceiveMessage = (msg: any) => {
-            console.log('📨 Received message:', msg);
+        const handleReceiveMessage = (msg) => {
 
-            // Check if message is for current chat
-            if (msg.chatId !== chatId) return;
+            const incomingChatId = msg.chat || msg.chatId;
 
-            setMessages((prev) => {
-                const exists = prev.some((m) => m.id === msg._id);
-                if (exists) return prev;
+            if (incomingChatId !== chatId) {
+                return;
+            }
 
-                const isMe = msg.senderId === currentUserId;
-                const newMessage: DisplayMessage = {
-                    id: msg._id || Date.now().toString(),
-                    text: msg.text,
-                    image: msg.imageUrl,
-                    sender: isMe ? "me" : "other",
-                    time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-                    status: "delivered",
-                    senderName: isMe ? "Me" : (userName as string) || "User"
-                };
+            const senderId = msg.sender?._id || msg.senderId;
+
+            const isMe = senderId === currentUserId;
+
+            const newMessage = {
+                id: msg._id,
+                text: msg.text,
+                image: msg.imageUrl,
+                sender: isMe ? "me" : "other",
+                time: new Date(msg.createdAt).toLocaleTimeString([], {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                }),
+                status: "delivered",
+                senderName: msg.sender?.name || userName || "User",
+            };
+
+            setMessages(prev => {
+
+                const senderId = msg.sender?._id || msg.senderId;
+
+                const isMyMessage = senderId === currentUserId;
+
+                if (isMyMessage) {
+
+                    const tempIndex = prev.findIndex(
+                        m =>
+                            m.sender === "me" &&
+                            m.text === msg.text &&
+                            m.status === "sending"
+                    );
+
+                    if (tempIndex !== -1) {
+
+                        const updated = [...prev];
+
+                        updated[tempIndex] = {
+                            ...updated[tempIndex],
+                            id: msg._id,
+                            status: "delivered",
+                        };
+
+                        return updated;
+                    }
+                }
+
+                const exists = prev.some(m => m.id === msg._id);
+
+                if (exists) {
+                    return prev;
+                }
+
                 return [...prev, newMessage];
             });
 
-            setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
+            requestAnimationFrame(() => {
+                flatListRef.current?.scrollToEnd({
+                    animated: true,
+                });
+            });
         };
 
         // Listen for image messages
         const handleReceiveImage = (imageMsg: any) => {
-            console.log('📸 Received image:', imageMsg);
 
-            if (imageMsg.chatId !== chatId) return;
+            if (imageMsg.chat !== chatId) return;
 
             setMessages((prev) => {
                 const exists = prev.some((m) => m.id === imageMsg._id);
@@ -248,17 +248,17 @@ export default function ChatScreen() {
             socket.off('receiveMessage', handleReceiveMessage);
             socket.off('receiveImage', handleReceiveImage);
         };
-    }, [chatId, currentUserId, userName]);
+    }, [socket, chatId, currentUserId, userName]);
 
-    // Join chat room when chatId changes and socket is connected (matching React app)
     useEffect(() => {
-        if (chatId && isConnected && socket) {
-            socket.emit('joinChat', chatId);
-            console.log('📢 Joined chat room:', chatId);
+        if (socket && chatId) {
+            socket.emit(
+                "joinChat",
+                chatId
+            );
         }
-    }, [chatId, isConnected]);
+    }, [socket, chatId]);
 
-    // Fetch initial messages (matching React app)
     const fetchChat = useCallback(async (showLoadingIndicator = false) => {
         if (!chatId || !currentUserId) return;
 
@@ -269,6 +269,7 @@ export default function ChatScreen() {
         try {
             const response = await axios.get(`https://real-chat-backend-c3nm.onrender.com/api/messages/${chatId}`);
             console.log("📚 Fetched messages count:", response.data.length);
+            // console.log("📚 Fetched messages:", response.data);
 
             const transformedMessages: DisplayMessage[] = response.data.map((msg: Message) => {
                 const isMe = msg.sender._id === currentUserId;
@@ -285,7 +286,13 @@ export default function ChatScreen() {
             });
 
             setMessages(transformedMessages);
-            setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
+            // setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
+            setTimeout(() => {
+                flatListRef.current?.scrollToEnd({
+                    animated: false,
+                });
+            }, 300);
+
         } catch (error: any) {
             console.error("❌ Error fetching messages:", error.response?.data?.message || error.message);
             if (showLoadingIndicator) {
@@ -298,24 +305,29 @@ export default function ChatScreen() {
         }
     }, [chatId, currentUserId, showLoader, hideLoader]);
 
-    // Send message using ONLY socket.io (matching React app logic)
+    useEffect(() => {
+        if (messages.length > 0) {
+            setTimeout(() => {
+                flatListRef.current?.scrollToEnd({ animated: false });
+            }, 100);
+        }
+    }, [messages]);
+
     const sendMessage = () => {
-        if (!message.trim()) return;
+        const textToSend = message.trim();
+
+        if (!textToSend) return;
+
         if (!socket || !socket.connected) {
             Alert.alert("Error", "Not connected to server");
             return;
         }
 
-        // console.log("Sending message via socket:", {
-        //     chatId: chatId,
-        //     senderId: currentUserId,
-        //     text: message,
-        // });
-
         const tempId = `temp-${Date.now()}`;
-        const newMessage: DisplayMessage = {
+
+        const optimisticMessage: DisplayMessage = {
             id: tempId,
-            text: message,
+            text: textToSend,
             sender: "me",
             time: new Date().toLocaleTimeString([], {
                 hour: "2-digit",
@@ -324,40 +336,30 @@ export default function ChatScreen() {
             status: "sending",
             senderName: "Me",
         };
-        setMessages((prev) => [...prev, newMessage]);
-        const messageText = message;
+
+        setMessages(prev => [...prev, optimisticMessage]);
+
         setMessage("");
+
         setTimeout(() => {
-            flatListRef.current?.scrollToEnd({ animated: true });
-        }, 100);
+            flatListRef.current?.scrollToEnd({
+                animated: true,
+            });
+        }, 150);
 
-        // Emit via socket exactly like React app
         socket.emit("sendMessage", {
-            chatId: chatId,
+            chatId,
             senderId: currentUserId,
-            text: message,
+            text: textToSend,
+            tempId,
         });
-
-        // Clear input
-        // setMessage("");
-
-        // Auto-scroll will happen when we receive the message back via socket
     };
 
-    // Initial load (matching React app)
     useEffect(() => {
         if (!chatId || !currentUserId) return;
 
         fetchChat(true);
-
-        // No polling needed since socket provides real-time updates
-        // But keep a longer interval as fallback
-        const interval = setInterval(() => {
-            fetchChat(false);
-        }, 30000);
-
-        return () => clearInterval(interval);
-    }, [chatId, currentUserId, fetchChat]);
+    }, [chatId, currentUserId]);
 
     const onRefresh = useCallback(async () => {
         setRefreshing(true);
@@ -366,6 +368,7 @@ export default function ChatScreen() {
     }, [fetchChat]);
 
     const handleImagePick = async () => {
+        setShowMediaOptions(false);
         const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
         if (status !== 'granted') {
             Alert.alert('Permission needed', 'Please grant permission to access your photos');
@@ -373,53 +376,95 @@ export default function ChatScreen() {
         }
 
         const result = await ImagePicker.launchImageLibraryAsync({
-            mediaTypes: ImagePicker.MediaTypeOptions.Images,
-            allowsEditing: true,
+            mediaTypes: ['images'],
+            allowsEditing: false,
             quality: 0.8,
+            allowsMultipleSelection: false,
         });
 
-        if (!result.canceled) {
-            showLoader("Uploading image...");
-
-            const formData = new FormData();
-            formData.append('image', {
-                uri: result.assets[0].uri,
-                type: 'image/jpeg',
-                name: 'photo.jpg',
-            } as any);
-            formData.append('chatId', chatId as string);
-            formData.append('senderId', currentUserId);
-
-            try {
-                const response = await axios.post(`https://real-chat-backend-c3nm.onrender.com/api/messages/image`, formData, {
-                    headers: { 'Content-Type': 'multipart/form-data' },
-                });
-
-                // Emit via socket for real-time
-                if (socket && socket.connected) {
-                    socket.emit("sendImage", {
-                        chatId: chatId,
-                        senderId: currentUserId,
-                        imageUrl: response.data.imageUrl,
-                        imageName: response.data.imageName,
-                        imageSize: response.data.imageSize,
-                        messageId: response.data._id
-                    });
-                }
-
-                await fetchChat(false);
-                Alert.alert("Success", "Image sent successfully");
-            } catch (error) {
-                console.error("Error uploading image:", error);
-                Alert.alert("Error", "Failed to upload image");
-            } finally {
-                hideLoader();
-                setShowMediaOptions(false);
-            }
+        if (!result.canceled && result.assets[0]) {
+            // Show preview instead of uploading immediately
+            setTimeout(() => {
+                setSelectedImageUri(result.assets[0].uri);
+                setShowImagePreview(true);
+            }, 100);
         }
     };
 
+    const handleCropImage = async () => {
+        if (!selectedImageUri) return;
+
+        // Use ImagePicker's crop capability only when user wants to crop
+        const result = await ImagePicker.launchImageLibraryAsync({
+            mediaTypes: ['images'],
+            allowsEditing: true,
+            quality: 1,
+            aspect: [4, 3], // Optional: specify crop aspect ratio
+            base64: false,
+        });
+
+        if (!result.canceled && result.assets[0]) {
+            setSelectedImageUri(result.assets[0].uri);
+            setShowImagePreview(true);
+        }
+    };
+
+    const sendSelectedImage = async () => {
+        if (!selectedImageUri) return;
+
+        setShowImagePreview(false);
+        showLoader("Uploading image...");
+
+        const formData = new FormData();
+        formData.append('image', {
+            uri: selectedImageUri,
+            type: 'image/jpeg',
+            name: `photo_${Date.now()}.jpg`,
+        } as any);
+        formData.append('chatId', chatId as string);
+        formData.append('senderId', currentUserId);
+
+        try {
+            const response = await axios.post(
+                `https://real-chat-backend-c3nm.onrender.com/api/messages/send-image`,
+                formData,
+                {
+                    headers: { 'Content-Type': 'multipart/form-data' },
+                }
+            );
+
+            if (socket && socket.connected) {
+                socket.emit("sendImage", {
+                    chatId: chatId,
+                    senderId: currentUserId,
+                    imageUrl: response.data.imageUrl,
+                    imageName: response.data.imageName,
+                    imageSize: response.data.imageSize,
+                    messageId: response.data._id
+                });
+            }
+
+            await fetchChat(false);
+            setSelectedImageUri(null);
+
+            // Optional: Show success feedback
+            // Alert.alert("Success", "Image sent successfully");
+        } catch (error) {
+            console.error("Error uploading image:", error);
+            Alert.alert("Error", "Failed to upload image");
+        } finally {
+            hideLoader();
+        }
+    };
+
+    const cancelImagePreview = () => {
+        setShowImagePreview(false);
+        setSelectedImageUri(null);
+    };
+
     const handleCamera = async () => {
+        setShowMediaOptions(false);
+
         const { status } = await ImagePicker.requestCameraPermissionsAsync();
         if (status !== 'granted') {
             Alert.alert('Permission needed', 'Please grant permission to access camera');
@@ -427,47 +472,13 @@ export default function ChatScreen() {
         }
 
         const result = await ImagePicker.launchCameraAsync({
-            allowsEditing: true,
+            allowsEditing: false,
             quality: 0.8,
         });
 
-        if (!result.canceled) {
-            showLoader("Uploading image...");
-
-            const formData = new FormData();
-            formData.append('image', {
-                uri: result.assets[0].uri,
-                type: 'image/jpeg',
-                name: 'photo.jpg',
-            } as any);
-            formData.append('chatId', chatId as string);
-            formData.append('senderId', currentUserId);
-
-            try {
-                const response = await axios.post(`https://real-chat-backend-c3nm.onrender.com/api/messages/image`, formData, {
-                    headers: { 'Content-Type': 'multipart/form-data' },
-                });
-
-                if (socket && socket.connected) {
-                    socket.emit("sendImage", {
-                        chatId: chatId,
-                        senderId: currentUserId,
-                        imageUrl: response.data.imageUrl,
-                        imageName: response.data.imageName,
-                        imageSize: response.data.imageSize,
-                        messageId: response.data._id
-                    });
-                }
-
-                await fetchChat(false);
-                Alert.alert("Success", "Image sent successfully");
-            } catch (error) {
-                console.error("Error uploading image:", error);
-                Alert.alert("Error", "Failed to upload image");
-            } finally {
-                hideLoader();
-                setShowMediaOptions(false);
-            }
+        if (!result.canceled && result.assets[0]) {
+            setSelectedImageUri(result.assets[0].uri);
+            setShowImagePreview(true);
         }
     };
 
@@ -491,7 +502,7 @@ export default function ChatScreen() {
         startCall('video');
     };
 
-    const startCall = async (type) => {
+    const startCall = async (type: any) => {
         if (callConnecting || callVisible) {
             return;
         }
@@ -602,28 +613,28 @@ export default function ChatScreen() {
             transparent={true}
             animationType="fade"
         >
-            <View style={styles.incomingCallOverlay}>
-                <View style={styles.incomingCallCard}>
-                    <View style={styles.incomingCallAvatar}>
-                        <Text style={styles.incomingCallAvatarText}>
+            <View style={additionalStyles.incomingCallOverlay}>
+                <View style={additionalStyles.incomingCallCard}>
+                    <View style={additionalStyles.incomingCallAvatar}>
+                        <Text style={additionalStyles.incomingCallAvatarText}>
                             {incomingCall?.fromName?.charAt(0).toUpperCase()}
                         </Text>
                     </View>
-                    <Text style={styles.incomingCallName}>{incomingCall?.fromName}</Text>
-                    <Text style={styles.incomingCallType}>
+                    <Text style={additionalStyles.incomingCallName}>{incomingCall?.fromName}</Text>
+                    <Text style={additionalStyles.incomingCallType}>
                         {incomingCall?.callType === 'video' ? 'Video Call' : 'Audio Call'}
                     </Text>
 
-                    <View style={styles.incomingCallActions}>
+                    <View style={additionalStyles.incomingCallActions}>
                         <TouchableOpacity
-                            style={[styles.incomingCallButton, styles.rejectButton]}
+                            style={[additionalStyles.incomingCallButton, additionalStyles.rejectButton]}
                             onPress={rejectCall}
                         >
                             <Ionicons name="call" size={28} color="#fff" />
                         </TouchableOpacity>
 
                         <TouchableOpacity
-                            style={[styles.incomingCallButton, styles.acceptButton]}
+                            style={[additionalStyles.incomingCallButton, additionalStyles.acceptButton]}
                             onPress={acceptCall}
                         >
                             <Ionicons name="call" size={28} color="#fff" />
@@ -634,7 +645,7 @@ export default function ChatScreen() {
         </Modal>
     );
 
-    const additionalStyles = {
+    const additionalStyles = StyleSheet.create({
         incomingCallOverlay: {
             flex: 1,
             backgroundColor: 'rgba(0,0,0,0.9)',
@@ -691,35 +702,24 @@ export default function ChatScreen() {
             backgroundColor: '#ef4444',
             transform: [{ rotate: '135deg' }],
         },
-    };
+    });
 
-    const renderMessage = ({ item }: { item: DisplayMessage }) => {
-        const isMe = item.sender === "me";
+    const handleImageLoad = (id: string, width: number, height: number) => {
+        const maxWidth = 250;
+        const maxHeight = 300;
 
-        return (
-            <View style={[styles.messageWrapper, isMe ? styles.myMessageWrapper : styles.otherMessageWrapper]}>
-                <View style={[styles.messageBubble, isMe ? styles.myMessage : styles.otherMessage]}>
-                    {item.image ? (
-                        <Image source={{ uri: item.image }} style={styles.messageImage} />
-                    ) : (
-                        <Text style={[styles.messageText, isMe ? styles.myMessageText : styles.otherMessageText]}>
-                            {item.text}
-                        </Text>
-                    )}
-                    <View style={styles.messageInfo}>
-                        <Text style={styles.messageTime}>{item.time}</Text>
-                        {isMe && (
-                            <Ionicons
-                                name="checkmark-done"
-                                size={14}
-                                color="#34b7f1"
-                                style={styles.messageStatus}
-                            />
-                        )}
-                    </View>
-                </View>
-            </View>
-        );
+        let newWidth = Math.min(width, maxWidth);
+        let newHeight = (newWidth / width) * height;
+
+        if (newHeight > maxHeight) {
+            newHeight = maxHeight;
+            newWidth = (maxHeight / height) * width;
+        }
+
+        setImageSizes(prev => ({
+            ...prev,
+            [id]: { width: newWidth, height: newHeight }
+        }));
     };
 
     const ChatOptionsModal = () => (
@@ -784,169 +784,163 @@ export default function ChatScreen() {
         </Modal>
     );
 
-    const MediaOptionsModal = () => (
-        <Modal
-            visible={showMediaOptions}
-            transparent={true}
-            animationType="slide"
-            onRequestClose={() => setShowMediaOptions(false)}
-        >
-            <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={() => setShowMediaOptions(false)}>
-                <View style={styles.mediaModalContent}>
-                    <View style={styles.mediaModalHeader}>
-                        <Text style={styles.modalTitle}>Add Media</Text>
-                    </View>
+    const formatLastSeen = (dateString: string) => {
+        if (!dateString) return "";
 
-                    <View style={styles.mediaOptions}>
-                        <TouchableOpacity style={styles.mediaOption} onPress={handleCamera}>
-                            <View style={[styles.mediaIconBg, { backgroundColor: "#075e54" }]}>
-                                <Ionicons name="camera" size={28} color="#fff" />
-                            </View>
-                            <Text style={styles.mediaOptionText}>Camera</Text>
-                        </TouchableOpacity>
+        const date = new Date(dateString);
+        const now = new Date();
 
-                        <TouchableOpacity style={styles.mediaOption} onPress={handleImagePick}>
-                            <View style={[styles.mediaIconBg, { backgroundColor: "#128c7e" }]}>
-                                <Ionicons name="images" size={28} color="#fff" />
-                            </View>
-                            <Text style={styles.mediaOptionText}>Gallery</Text>
-                        </TouchableOpacity>
+        const hours = date.getHours();
+        const minutes = String(date.getMinutes()).padStart(2, "0");
 
-                        <TouchableOpacity style={styles.mediaOption} onPress={() => setShowMediaOptions(false)}>
-                            <View style={[styles.mediaIconBg, { backgroundColor: "#dc2626" }]}>
-                                <Ionicons name="document" size={28} color="#fff" />
-                            </View>
-                            <Text style={styles.mediaOptionText}>Document</Text>
-                        </TouchableOpacity>
+        const formattedHours = hours % 12 || 12;
+        const ampm = hours >= 12 ? "PM" : "AM";
 
-                        <TouchableOpacity style={styles.mediaOption} onPress={() => setShowMediaOptions(false)}>
-                            <View style={[styles.mediaIconBg, { backgroundColor: "#34b7f1" }]}>
-                                <Ionicons name="location" size={28} color="#fff" />
-                            </View>
-                            <Text style={styles.mediaOptionText}>Location</Text>
-                        </TouchableOpacity>
+        const time = `${formattedHours}:${minutes} ${ampm}`;
 
-                        <TouchableOpacity style={styles.mediaOption} onPress={() => setShowMediaOptions(false)}>
-                            <View style={[styles.mediaIconBg, { backgroundColor: "#f39c12" }]}>
-                                <Ionicons name="mic" size={28} color="#fff" />
-                            </View>
-                            <Text style={styles.mediaOptionText}>Audio</Text>
-                        </TouchableOpacity>
+        if (date.toDateString() === now.toDateString()) {
+            return `today at ${time}`;
+        }
 
-                        <TouchableOpacity style={styles.mediaOption} onPress={() => setShowMediaOptions(false)}>
-                            <View style={[styles.mediaIconBg, { backgroundColor: "#e74c3c" }]}>
-                                <Ionicons name="videocam" size={28} color="#fff" />
-                            </View>
-                            <Text style={styles.mediaOptionText}>Video</Text>
-                        </TouchableOpacity>
-                    </View>
-                </View>
-            </TouchableOpacity>
-        </Modal>
-    );
+        const yesterday = new Date();
+        yesterday.setDate(now.getDate() - 1);
+
+        if (date.toDateString() === yesterday.toDateString()) {
+            return `yesterday at ${time}`;
+        }
+
+        return `${date.getDate()} ${date.toLocaleString("en-US", {
+            month: "short",
+        })} at ${time}`;
+    };
 
     return (
         <>
+            <ImagePreviewModalComponent
+                visible={showImagePreview}
+                imageUri={selectedImageUri}
+                onClose={cancelImagePreview}
+                onCrop={handleCropImage}
+                onSend={sendSelectedImage}
+            />
+
             <Stack.Screen
                 options={{
-                    headerTitle: () => (
-                        <TouchableOpacity style={styles.headerInfo} onPress={() => setShowOptions(true)}>
-                            <View style={styles.headerAvatar}>
-                                <Text style={styles.headerAvatarText}>{userName?.charAt(0)}</Text>
-                            </View>
-                            <View>
-                                <Text style={styles.headerName}>{userName}</Text>
-                                <Text style={styles.headerStatus}>
-                                    {isOnline === "true" ? "Online" : (userStatus || "Offline")}
-                                    {!isConnected && " • Connecting..."}
-                                </Text>
-                            </View>
-                        </TouchableOpacity>
-                    ),
-                    headerLeft: () => (
-                        <TouchableOpacity onPress={() => router.back()} style={styles.headerBack}>
-                            <Ionicons name="arrow-back" size={24} color="#075e54" />
-                        </TouchableOpacity>
-                    ),
-                    headerRight: () => (
-                        <View style={styles.headerRight}>
-                            <TouchableOpacity onPress={handleCall} style={styles.headerIcon}>
-                                <Ionicons name="call-outline" size={22} color="#075e54" />
-                            </TouchableOpacity>
-                            <TouchableOpacity onPress={handleVideoCall} style={styles.headerIcon}>
-                                <Ionicons name="videocam-outline" size={22} color="#075e54" />
-                            </TouchableOpacity>
-                            <TouchableOpacity onPress={() => setShowOptions(true)} style={styles.headerIcon}>
-                                <Ionicons name="ellipsis-vertical" size={22} color="#075e54" />
-                            </TouchableOpacity>
-                        </View>
+                    header: () => (
+                        <ChatHeader
+                            userName={userName}
+                            isChatUserOnline={isChatUserOnline}
+                            lastSeen={lastSeen}
+                            onBack={() => router.back()}
+                            onCall={handleCall}
+                            onVideoCall={handleVideoCall}
+                            onOptions={() => setShowOptions(true)}
+                            formatLastSeen={formatLastSeen}
+                        />
                     ),
                     headerStyle: { backgroundColor: "#f0f2f5" },
                     headerShadowVisible: false,
                 }}
             />
 
-            <KeyboardAvoidingView
+            < KeyboardAvoidingView
                 style={{ flex: 1 }}
-                behavior={Platform.OS === "ios" ? "padding" : "height"}
-                keyboardVerticalOffset={90}
+                behavior={Platform.OS === "ios" ? "padding" : "padding"}
+                keyboardVerticalOffset={Platform.OS === "ios" ? 60 : 60}
             >
-                <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-                    <View style={styles.container}>
-                        <FlatList
-                            ref={flatListRef}
-                            data={messages}
-                            renderItem={renderMessage}
-                            keyExtractor={(item) => item.id}
-                            contentContainerStyle={styles.messagesContainer}
-                            onContentSizeChange={() => flatListRef.current?.scrollToEnd({ animated: true })}
-                            refreshControl={
-                                <RefreshControl
-                                    refreshing={refreshing}
-                                    onRefresh={onRefresh}
-                                    colors={["#075e54"]}
-                                    tintColor="#075e54"
-                                />
-                            }
-                            ListEmptyComponent={() => (
-                                <View style={styles.emptyContainer}>
-                                    <Ionicons name="chatbubbles-outline" size={64} color="#ccc" />
-                                    <Text style={styles.emptyText}>No messages yet</Text>
-                                    <Text style={styles.emptySubText}>Start a conversation!</Text>
-                                </View>
-                            )}
+                <View style={styles.container}>
+                    <FlatList
+                        ref={flatListRef}
+                        data={messages}
+                        renderItem={({ item }) => (
+                            <MessageBubble
+                                item={item}
+                                imageSizes={imageSizes}
+                                onImageLoad={handleImageLoad}
+                                onImagePress={(uri) => {
+                                    setSelectedFullImage(uri);
+                                    setFullImageVisible(true);
+                                }}
+                            />
+                        )}
+                        keyExtractor={(item) => item.id}
+                        contentContainerStyle={styles.messagesContainer}
+                        keyboardDismissMode="on-drag"
+                        keyboardShouldPersistTaps="handled"
+                        showsVerticalScrollIndicator={true}
+                        initialNumToRender={50}
+                        maxToRenderPerBatch={10}
+                        windowSize={5}
+                        updateCellsBatchingPeriod={30}
+                        removeClippedSubviews={false}
+                        onLayout={() => {
+                            flatListRef.current?.scrollToEnd({
+                                animated: false,
+                            });
+                        }}
+                        // removeClippedSubviews={Platform.OS === 'android'}
+                        onContentSizeChange={() => {
+                            flatListRef.current?.scrollToEnd({ animated: false });
+                        }}
+                        refreshControl={
+                            <RefreshControl
+                                refreshing={refreshing}
+                                onRefresh={onRefresh}
+                                colors={["#075e54"]}
+                                tintColor="#075e54"
+                            />
+                        }
+                        ListEmptyComponent={() => (
+                            <View style={styles.emptyContainer}>
+                                <Ionicons name="chatbubbles-outline" size={64} color="#ccc" />
+                                <Text style={styles.emptyText}>No messages yet</Text>
+                                <Text style={styles.emptySubText}>Start a conversation!</Text>
+                            </View>
+                        )}
+                    />
+
+                    <View style={styles.inputContainer}>
+                        <TouchableOpacity style={styles.attachButton} onPress={() => setShowMediaOptions(true)}>
+                            <Ionicons name="add-circle" size={28} color="#075e54" />
+                        </TouchableOpacity>
+
+                        <TextInput
+                            style={styles.input}
+                            placeholder="Type a message..."
+                            value={message}
+                            onChangeText={setMessage}
+                            multiline
+                            maxLength={1000}
+                            autoCorrect={false}
+                            autoCapitalize="none"
+                            spellCheck={false}
+                            onBlur={() => {
+                                // Don't trim the message
+                                // Just keep as is
+                            }}
                         />
 
-                        <View style={styles.inputContainer}>
-                            <TouchableOpacity style={styles.attachButton} onPress={() => setShowMediaOptions(true)}>
-                                <Ionicons name="add-circle" size={28} color="#075e54" />
+                        {message.trim() ? (
+                            <TouchableOpacity style={styles.sendButton} onPress={sendMessage}>
+                                <Ionicons name="send" size={24} color="#075e54" />
                             </TouchableOpacity>
+                        ) : (
+                            <TouchableOpacity style={styles.micButton}>
+                                <Ionicons name="mic" size={24} color="#075e54" />
+                            </TouchableOpacity>
+                        )}
 
-                            <TextInput
-                                style={styles.input}
-                                placeholder="Type a message..."
-                                value={message}
-                                onChangeText={setMessage}
-                                multiline
-                                maxLength={1000}
-                            />
-
-                            {message.trim() ? (
-                                <TouchableOpacity style={styles.sendButton} onPress={sendMessage}>
-                                    <Ionicons name="send" size={24} color="#075e54" />
-                                </TouchableOpacity>
-                            ) : (
-                                <TouchableOpacity style={styles.micButton}>
-                                    <Ionicons name="mic" size={24} color="#075e54" />
-                                </TouchableOpacity>
-                            )}
-                        </View>
                     </View>
-                </TouchableWithoutFeedback>
-            </KeyboardAvoidingView>
+                </View>
+            </KeyboardAvoidingView >
 
             <ChatOptionsModal />
-            <MediaOptionsModal />
+            <MediaOptionsModal
+                visible={showMediaOptions}
+                onClose={() => setShowMediaOptions(false)}
+                onCamera={handleCamera}
+                onGallery={handleImagePick}
+            />
             <IncomingCallModal />
 
             <CallScreen
@@ -963,6 +957,13 @@ export default function ChatScreen() {
                     setIncomingCall(null);
                 }}
             />
+
+
+            <ShowFullImagePreviewModal
+                visible={fullImageVisible}
+                imageUri={selectedFullImage || ''}
+                onClose={() => setFullImageVisible(false)}
+            />
         </>
     );
 }
@@ -971,111 +972,22 @@ const styles = StyleSheet.create({
     container: {
         flex: 1,
         backgroundColor: "#f0f2f5",
-    },
-    headerInfo: {
-        flexDirection: "row",
-        alignItems: "center",
-    },
-    headerAvatar: {
-        width: 36,
-        height: 36,
-        borderRadius: 18,
-        backgroundColor: "#075e54",
-        alignItems: "center",
-        justifyContent: "center",
-        marginRight: 10,
-    },
-    headerAvatarText: {
-        color: "#fff",
-        fontSize: 16,
-        fontWeight: "bold",
-    },
-    headerName: {
-        fontSize: 16,
-        fontWeight: "600",
-        color: "#1f2937",
-    },
-    headerStatus: {
-        fontSize: 12,
-        color: "#6b7280",
-    },
-    headerBack: {
-        marginLeft: 8,
-    },
-    headerRight: {
-        flexDirection: "row",
-        marginRight: 8,
-    },
-    headerIcon: {
-        marginLeft: 16,
+        height: "100%",
     },
     messagesContainer: {
         paddingHorizontal: 12,
-        paddingVertical: 16,
+        paddingVertical: 6,
         flexGrow: 1,
-    },
-    messageWrapper: {
-        marginBottom: 12,
-    },
-    myMessageWrapper: {
-        alignItems: "flex-end",
-    },
-    otherMessageWrapper: {
-        alignItems: "flex-start",
-    },
-    messageBubble: {
-        maxWidth: "75%",
-        paddingHorizontal: 12,
-        paddingVertical: 8,
-        borderRadius: 18,
-    },
-    myMessage: {
-        backgroundColor: "#dcf8c5",
-        borderBottomRightRadius: 4,
-    },
-    otherMessage: {
-        backgroundColor: "#ffffff",
-        borderBottomLeftRadius: 4,
-    },
-    messageText: {
-        fontSize: 15,
-        lineHeight: 20,
-    },
-    myMessageText: {
-        color: "#1f2937",
-    },
-    otherMessageText: {
-        color: "#1f2937",
-    },
-    messageImage: {
-        width: 200,
-        height: 200,
-        borderRadius: 12,
-        marginBottom: 4,
-    },
-    messageInfo: {
-        flexDirection: "row",
-        alignItems: "center",
-        justifyContent: "flex-end",
-        marginTop: 2,
-    },
-    messageTime: {
-        fontSize: 10,
-        color: "#8696a0",
-        marginRight: 4,
-    },
-    messageStatus: {
-        marginLeft: 2,
     },
     inputContainer: {
         flexDirection: "row",
         alignItems: "center",
         paddingHorizontal: 12,
-        paddingVertical: 12,
+        paddingVertical: 8,
         backgroundColor: "#fff",
         borderTopWidth: 1,
         borderTopColor: "#e5e7eb",
-        marginBottom: 12,
+        marginBottom: 40,
     },
     attachButton: {
         marginRight: 8,
@@ -1131,39 +1043,6 @@ const styles = StyleSheet.create({
         marginLeft: 12,
         color: "#374151",
     },
-    mediaModalContent: {
-        backgroundColor: "#fff",
-        borderTopLeftRadius: 20,
-        borderTopRightRadius: 20,
-        padding: 20,
-    },
-    mediaModalHeader: {
-        alignItems: "center",
-        marginBottom: 20,
-    },
-    mediaOptions: {
-        flexDirection: "row",
-        flexWrap: "wrap",
-        justifyContent: "space-around",
-    },
-    mediaOption: {
-        alignItems: "center",
-        width: "30%",
-        marginBottom: 20,
-    },
-    mediaIconBg: {
-        width: 60,
-        height: 60,
-        borderRadius: 30,
-        alignItems: "center",
-        justifyContent: "center",
-        marginBottom: 8,
-    },
-    mediaOptionText: {
-        fontSize: 12,
-        color: "#6b7280",
-        marginTop: 4,
-    },
     emptyContainer: {
         flex: 1,
         justifyContent: "center",
@@ -1180,5 +1059,27 @@ const styles = StyleSheet.create({
         fontSize: 14,
         color: "#999",
         marginTop: 8,
+    },
+    previewContainer: {
+        backgroundColor: "#fff",
+        padding: 10,
+        borderTopWidth: 1,
+        borderColor: "#ddd",
+    },
+    previewImage: {
+        width: 150,
+        height: 150,
+        borderRadius: 10,
+    },
+    previewSendButton: {
+        position: "absolute",
+        right: 20,
+        bottom: 20,
+        backgroundColor: "#075e54",
+        width: 50,
+        height: 50,
+        borderRadius: 25,
+        justifyContent: "center",
+        alignItems: "center",
     },
 });

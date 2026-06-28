@@ -14,9 +14,9 @@ export default function ChatListScreen() {
     const [refreshing, setRefreshing] = useState(false);
     const { showLoader, hideLoader } = useLoading();
 
-
     useFocusEffect(
         useCallback(() => {
+
             const backHandler = BackHandler.addEventListener(
                 'hardwareBackPress',
                 () => {
@@ -27,7 +27,14 @@ export default function ChatListScreen() {
             return () => {
                 backHandler.remove();
             };
+
         }, [])
+    );
+
+    useFocusEffect(
+        useCallback(() => {
+            fetchUsers();
+        }, [loggedInUserId])
     );
 
     // Get logged in user ID from storage
@@ -56,16 +63,17 @@ export default function ChatListScreen() {
 
         try {
             const res = await axios.get(`https://real-chat-backend-c3nm.onrender.com/api/chats?userId=${loggedInUserId}`);
-
+            // console.log("res==============>>>>>", res.data);
             const transformedChats = res.data.map(chat => {
                 const otherUser = chat.users.find(user => user._id !== loggedInUserId);
                 const unreadCount = otherUser?.unreadMessages?.[loggedInUserId] || chat.unreadCount || 0;
                 const isOnline = otherUser?.isOnline || false;
                 const lastMessage = chat.lastMessage?.text || "No messages yet";
-                const lastMessageTime = chat.lastMessage?.createdAt || chat.updatedAt;
+                const lastMessageTime = chat.lastMessage?.createdAt || chat.updatedAt || new Date(0).toISOString();
 
                 return {
                     id: chat._id,
+                    userId: otherUser?._id,
                     name: otherUser?.name || "Unknown User",
                     email: otherUser?.email || "",
                     avatar: otherUser?.avatar || null,
@@ -79,9 +87,15 @@ export default function ChatListScreen() {
                 };
             });
 
-            const sortedChats = transformedChats.sort(
-                (a, b) => new Date(b.lastMessageTime) - new Date(a.lastMessageTime)
-            );
+            // const sortedChats = transformedChats.sort(
+            //     (a, b) => new Date(b.lastMessageTime) - new Date(a.lastMessageTime)
+            // );
+
+            const sortedChats = transformedChats.sort((a, b) => {
+                const timeA = new Date(a.lastMessageTime).getTime();
+                const timeB = new Date(b.lastMessageTime).getTime();
+                return timeB - timeA; // Descending order (newest first)
+            });
 
             setChats(sortedChats);
         } catch (error) {
@@ -107,7 +121,7 @@ export default function ChatListScreen() {
         if (loggedInUserId) {
             const interval = setInterval(() => {
                 fetchUsers(); // No loader for background updates
-            }, 30000);
+            }, 1000);
 
             return () => clearInterval(interval);
         }
@@ -120,13 +134,13 @@ export default function ChatListScreen() {
     }, [fetchUsers]);
 
     // Rest of your component remains the same...
-    const getAvatarColor = (name) => {
+    const getAvatarColor = (name: string) => {
         const colors = ["#ef4444", "#3b82f6", "#22c55e", "#eab308", "#a855f7", "#ec4899", "#06b6d4", "#14b8a6", "#f97316", "#8b5cf6", "#10b981", "#d946ef"];
         const index = name?.charAt(0).toUpperCase().charCodeAt(0) || 0;
         return colors[index % colors.length];
     };
 
-    const formatTime = (date) => {
+    const formatTime = (date: string) => {
         if (!date) return "";
         const messageDate = new Date(date);
         const now = new Date();
@@ -141,17 +155,20 @@ export default function ChatListScreen() {
         }
     };
 
-    const handleChatPress = (chat) => {
+    const handleChatPress = (chat: any) => {
+        // console.log("selected user========>>>>>", chat);
+        // console.log("Selected Chat:", JSON.stringify(chat, null, 2));
         router.push({
             pathname: "/chatscreen",
             params: {
                 chatId: chat.id,
+                userId: chat.userId,
                 userName: chat.name,
                 userAvatar: chat.avatar || "",
                 userEmail: chat.email,
                 userPhone: chat.phone,
                 userStatus: chat.status,
-                isOnline: chat.isOnline.toString(),
+                isOnline: chat.isOnline,
                 lastSeen: chat.lastSeen || ""
             }
         });
@@ -162,6 +179,7 @@ export default function ChatListScreen() {
     );
 
     const renderChatItem = ({ item: chat }) => {
+        // console.log("chat========>>>", chat);
         const hasUnread = chat.unreadCount > 0;
         const firstLetter = chat.name?.charAt(0).toUpperCase() || "?";
 

@@ -13,6 +13,7 @@ import { LoadingProvider, useLoading } from '@/context/LoadingContext';
 import Loader from '@/components/Loader';
 import { useAuth, AuthProvider } from '@/context/AuthContext';
 import CustomDrawerContent from '@/components/CustomDrawerContent';
+import { SocketProvider } from '@/context/SocketContext';
 
 // Custom header button component
 function DrawerToggleButton() {
@@ -133,9 +134,11 @@ export default function Layout() {
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
       <AuthProvider>
         <LoadingProvider>
-          <AnimatedSplashOverlay />
-          <DrawerNavigator />
-          <GlobalLoader />
+          <SocketProvider>
+            <AnimatedSplashOverlay />
+            <DrawerNavigator />
+            <GlobalLoader />
+          </SocketProvider>
         </LoadingProvider>
       </AuthProvider>
     </ThemeProvider>
